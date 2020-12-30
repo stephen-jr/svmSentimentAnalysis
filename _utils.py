@@ -75,22 +75,30 @@ def load_dataset(path):
     return X_Train, X_Test, Y_Train, Y_Test
 
 
-def classifier(x_train, x_test, y_train, y_test, save_name=None):
+def classifier(x_train, x_test, y_train, y_test, save_name=None, grid=None):
     print("=== === === Building SVM Classifier === === ===")
+    svm = None
     vectorizer = TfidfVectorizer(min_df=5, max_df=0.95, sublinear_tf=True, use_idf=True, ngram_range=(1, 2))
-    kfolds = StratifiedKFold(n_splits=5, shuffle=True, random_state=1)
     pipeline_svm = make_pipeline(vectorizer, SVC(probability=True, kernel="linear", class_weight="balanced"))
+    if grid:
+        kfolds = StratifiedKFold(n_splits=5, shuffle=True, random_state=1)
+        grid_svm = GridSearchCV(pipeline_svm,
+                                param_grid={'svc__C': [0.01, 0.1, 1]},
+                                cv=kfolds,
+                                scoring="roc_auc",
+                                verbose=1,
+                                n_jobs=-1)
 
-    grid_svm = GridSearchCV(pipeline_svm,
-                            param_grid={'svc__C': [0.01, 0.1, 1]},
-                            cv=kfolds,
-                            scoring="roc_auc",
-                            verbose=1,
-                            n_jobs=-1)
-
-    grid_svm.fit(x_train, y_train)
+        grid_svm.fit(x_train, y_train)
+        svm = grid_svm
+    else:
+        svm = make_pipeline(vectorizer, SVC(probability=True, kernel="linear", class_weight="balanced"))
+        svm.fit(x_train, y_train)
     print("\n=========================================================")
-    print("Model's Validation Score : ", grid_svm.score(x_test, y_test))
+    try:
+        print("Model's Validation Score : ", svm.score(x_test, y_test))
+    except AttributeError:
+        pass
     print("==========================================================")
     print("=== === === Build Complete === === ===")
     print("Saving Model ----------->")
@@ -99,9 +107,9 @@ def classifier(x_train, x_test, y_train, y_test, save_name=None):
         if os.path.exists(path):
             os.remove(path)
         with open(path, 'wb') as f:
-            dill.dump(grid_svm, f)
+            dill.dump(svm, f)
     print("Save Complete ---------->")
-    return grid_svm
+    return svm
 
 
 def report_results(model, x, y):
