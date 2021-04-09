@@ -1,14 +1,4 @@
-import os
-import re
-import dill
-import nltk
-import pandas as pd
-from sklearn.svm import SVC
-import matplotlib.pyplot as plt
-from sklearn.pipeline import make_pipeline
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.model_selection import train_test_split, StratifiedKFold, GridSearchCV
-from sklearn.metrics import confusion_matrix, roc_auc_score, recall_score, precision_score, accuracy_score, f1_score, roc_curve
+from imports import *
 
 
 def replace_parenth(arr):
@@ -75,6 +65,68 @@ def load_dataset(path):
     return X_Train, X_Test, Y_Train, Y_Test
 
 
+def tokenize_texts(x_trn, x_tst):
+    maxlen = 70
+    tokenizer = Tokenizer(10000)
+    tokenizer.fit_on_texts(x_trn)
+    X_train = tokenizer.texts_to_sequences(x_trn)
+    X_train = pad_sequences(X_train, maxlen=maxlen, padding='post')
+    X_test = tokenizer.texts_to_sequences(x_tst)
+    X_test = pad_sequences(X_test, maxlen=maxlen, padding='post')
+    vocab_size = len(tokenizer.word_index) + 1
+    return X_train, X_test, maxlen, vocab_size
+
+
+def define_model(vcb_size, mxln, mtrcs):
+    model = Sequential()
+    model.add(Embedding(vcb_size, 200, input_length=mxln))
+    model.add(Conv1D(128, 2, activation='relu'))
+    model.add(MaxPooling1D())
+    model.add(Conv1D(256, 3, activation='relu'))
+    model.add(MaxPooling1D())
+    model.add(Flatten())
+    model.add(Dense(128, activation='relu'))
+    model.add(Dropout(0.5))
+    model.add(Dense(1, activation='sigmoid'))
+    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=mtrcs)
+    model.summary()
+    return model
+
+
+def cnn_feature_extractor(model, x_train, x_test):
+    for layer in model.layers:
+        print(layer)
+    feature_extractor = Model(model.layers[0].input, outputs=[model.layers[7].output])
+    x_train_features = feature_extractor(x_train)
+    x_test_features = feature_extractor(x_test)
+    x_train_features = np.array(x_train_features)
+    x_test_features = np.array(x_test_features)
+    return x_train_features, x_test_features
+
+
+def train_model(x_train, x_test, y_train, y_test, model=None):
+    assert model is not None
+    es = EarlyStopping(monitor='val_loss', mode='min', patience=2, verbose=1)
+    tfb = TensorBoard(log_dir="./logs/cnn", histogram_freq=1)
+    start = time()
+    history = model.fit(x_train,
+                        y_train,
+                        epochs=30,
+                        verbose=True,
+                        validation_data=(x_test, y_test),
+                        batch_size=128,
+                        callbacks=[es, tfb])
+    training_time = time() - start
+    print("Training Time : ", training_time)
+
+    _, tp, tn, fp, fn, acc, pre, rec, auc = model.evaluate(x_test, y_test)
+    print("Accuracy : ", acc)
+    print("Precision : ", pre)
+    print("Recall : ", rec)
+    print("AUC : ", auc)
+    return history, model
+
+
 def classifier(x_train, x_test, y_train, y_test, save_name=None, grid=None):
     print("=== === === Building SVM Classifier === === ===")
     svm = None
@@ -112,15 +164,54 @@ def classifier(x_train, x_test, y_train, y_test, save_name=None, grid=None):
     return svm
 
 
+def cnn_model(x_train, x_test, y_train, y_test, save_name=None):
+    METRICS = [
+        TruePositives(name='tp'),
+        TrueNegatives(name='tn'),
+        FalsePositives(name='fp'),
+        FalseNegatives(name='fn'),
+        BinaryAccuracy(name='accuracy'),
+        Precision(name='precision'),
+        Recall(name='recall'),
+        AUC(name='auc'),
+    ]
+
+    x_train, x_test, maxlen, vocab_size = tokenize_texts(x_train, x_test)
+    model = define_model(vocab_size, maxlen, METRICS)
+    x_train = np.asarray(x_train).astype('float32')
+    x_test = np.asarray(x_test).astype('float32')
+    y_train = np.asarray(y_train).astype('float32')
+    y_test = np.asarray(y_test).astype('float32')
+    history, model = train_model(x_train, x_test, y_train, y_test, model)
+    if save_name is not None:
+        model.save('saves/'+save_name)
+
+    x_train_features, x_test_features = cnn_feature_extractor(model, x_train, x_test)
+    parameters = {'kernel': ['rbf'],
+                  'C': [1, 10, 100, 1000],
+                  'gamma': [1e-3, 1e-4]}
+    clf = GridSearchCV(SVC(), parameters)
+    clf.fit(x_train_features, y_train)
+    svmclf = clf.best_estimator_
+    svmclf.fit(x_train_features, y_train)
+    y_pred_svm = svmclf.predict(x_test_features)
+    svm_report = classification_report(y_test, y_pred_svm)
+    print(svm_report)
+
+
 def report_results(model, x, y):
-    pred_proba = model.predict_proba(x)[:, 1]
+    auc = None
+    if isinstance(model, SVC):
+        pred_proba = model.predict_proba(x)[:, 1]
+        auc = roc_auc_score(y, pred_proba)
     pred = model.predict(x)
-    auc = roc_auc_score(y, pred_proba)
     acc = accuracy_score(y, pred)
     f1 = f1_score(y, pred)
     prec = precision_score(y, pred)
     rec = recall_score(y, pred)
-    result = {'auc': auc, 'f1': f1, 'acc': acc, 'precision': prec, 'recall': rec}
+    result = {'f1': f1, 'acc': acc, 'precision': prec, 'recall': rec}
+    if isinstance(model, SVC):
+        result['auc'] = auc
     c_matrix = confusion_matrix(y, pred)
     return {'metrics': result, 'confusion_matrix': c_matrix}
 
